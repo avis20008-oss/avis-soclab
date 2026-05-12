@@ -4,7 +4,6 @@ A fully functional Security Operations Center (SOC) homelab built with Docker.
 Includes a live SIEM, monitored endpoints, custom detection rules mapped to MITRE ATT&CK,
 and attack simulation scripts that generate real alerts.
 
-> **Demo video:** [link here once recorded]  
 > **Stack:** Wazuh 4.7 · OpenSearch · Docker · Python
 
 ---
