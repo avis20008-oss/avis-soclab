@@ -1,0 +1,202 @@
+title: Lateral Movement via PsExec
+id: c2a9f4e7-3b1d-4c8a-9e5f-1a3b5c7d9e2f
+status: stable
+description: |
+  Detects lateral movement using PsExec or PsExec-like remote execution
+  utilities. PsExec is a legitimate Sysinternals tool that allows remote
+  command execution over SMB (port 445). It is heavily abused by attackers
+  because:
+    • It uses existing Windows admin shares (ADMIN$, IPC$)
+    • It requires no additional software on the target beyond SMB access
+    • It creates a service on the target (PSEXESVC) as a side effect
+    • It can run commands as SYSTEM remotely
+
+  PsExec and its clones (Impacket's psexec.py, Cobalt Strike's psexec,
+  Metasploit's psexec module) all share similar behavioral artifacts,
+  making them detectable via endpoint telemetry.
+
+author: SOC Home Lab
+date: 2026-05-11
+modified: 2026-05-11
+references:
+  - https://attack.mitre.org/techniques/T1021/002/
+  - https://docs.microsoft.com/en-us/sysinternals/downloads/psexec
+  - https://github.com/fortra/impacket/blob/master/examples/psexec.py
+
+tags:
+  - attack.lateral_movement
+  - attack.t1021.002          # Remote Services: SMB/Windows Admin Shares
+  - attack.t1570              # Lateral Tool Transfer
+  - attack.t1543.003          # Create or Modify System Process: Windows Service
+  - attack.execution
+  - attack.t1569.002          # System Services: Service Execution
+
+logsource:
+  product: windows
+  # Multi-source detection — correlate across log types for high confidence
+  # Primary:   Sysmon Event ID 1, 3, 13 (process, network, registry)
+  # Secondary: Windows System Event ID 7045 (new service installed)
+  # Secondary: Windows Security Event ID 4624 (logon type 3), 4697 (service)
+  # Secondary: Windows Security Event ID 4648 (explicit credentials)
+  definition: |
+    Requires Sysmon AND Windows Security logging for full coverage.
+    Sysmon: Process Creation (ID 1), Network Connection (ID 3)
+    Windows Security: Audit Logon (4624), Audit Service Changes (4697)
+
+detection:
+  # ── PsExec process on SOURCE (attacker) machine ───────────
+  selection_psexec_binary:
+    # Original Sysinternals PsExec signature
+    Image|endswith:
+      - '\PsExec.exe'
+      - '\PsExec64.exe'
+      - '\psexec.exe'
+    # Impacket psexec leaves different artifacts — covered below
+
+  # ── PsExec service creation on TARGET machine ─────────────
+  # Windows System Event 7045: New service installed
+  selection_service_install:
+    EventID: 7045
+    ServiceName|contains:
+      - 'PSEXESVC'              # Original PsExec service name
+      - 'psexecsvc'
+    # Impacket psexec uses random service names — catch by binary path
+    ImagePath|contains:
+      - 'ADMIN$'
+      - '\\ADMIN$\\'
+
+  # ── Random service name with ADMIN$ path (Impacket/clone) ─
+  selection_impacket_service:
+    EventID: 7045
+    ImagePath|startswith: '%SYSTEMROOT%\\'
+    ImagePath|endswith: '.exe'
+    ServiceType: 'own process'
+    # Service start type is "demand" (manual) — created then immediately started
+    StartType: 'demand start'
+
+  # ── PSEXESVC.exe execution on target ──────────────────────
+  selection_psexesvc:
+    Image|endswith: '\PSEXESVC.exe'
+    # Or running from ADMIN$ share path
+    Image|contains: '\Windows\PSEXESVC'
+
+  # ── Child processes spawned by PsExec service ─────────────
+  # PSEXESVC.exe is the parent of commands run via psexec on target
+  selection_child_of_psexec:
+    ParentImage|endswith: '\PSEXESVC.exe'
+
+  # ── Network: SMB connection from psexec to ADMIN$ ─────────
+  selection_smb_admin:
+    # Sysmon Event ID 3 — Network Connection
+    EventID: 3
+    DestinationPort: 445
+    Image|endswith: '\PsExec.exe'
+
+  # ── Windows Security: Explicit credentials logon type 3 ───
+  # Type 3 = Network logon (SMB auth to admin share)
+  selection_logon_type3:
+    EventID: 4624
+    LogonType: 3
+    LogonProcessName: 'NtLmSsp'   # NTLM auth on SMB (common with PsExec)
+    TargetUserName|endswith: '$'   # Machine account — suspicious combination
+
+  # ── Security Event 4697: Service created with privileges ──
+  selection_service_privilege:
+    EventID: 4697
+    ServiceName|contains: 'PSEXESVC'
+
+  # High-confidence single-event matches
+  condition: >
+    selection_psexec_binary or
+    selection_service_install or
+    selection_psexesvc or
+    selection_child_of_psexec or
+    selection_service_privilege or
+    (selection_impacket_service and selection_logon_type3)
+
+falsepositives:
+  - Legitimate IT administration using PsExec for remote management
+  - Authorized penetration testing activities
+  - Some software deployment tools that use PsExec internally (rare)
+  - Wazuh/security tools that test lateral movement paths in authorized scans
+  # Context is key: PsExec from IT admin workstation to server during business
+  # hours is very different from PsExec from a workstation to workstation at 2am.
+
+level: critical
+
+# ============================================================
+# SOC Analyst Playbook
+# ============================================================
+# TRIAGE STEPS:
+#   1. Identify source host (attacker machine) from Event 4624 LogonIP
+#   2. Identify target host (where service was created) from Event 7045
+#   3. Determine the user account used for authentication
+#   4. Is the source→target combination expected? (check CMDB / IT change tickets)
+#   5. What commands were executed via the PsExec session?
+#      Look for: child processes of PSEXESVC.exe, command line logging
+#
+# RED FLAGS — LIKELY MALICIOUS:
+#   • Source is a workstation (not a dedicated admin jump host)
+#   • Activity occurs outside business hours
+#   • Destination is a DC, file server, or other high-value target
+#   • Multiple hops: Host A → Host B → Host C (multi-stage lateral movement)
+#   • New user account or service account used (credential theft → pivot)
+#   • Random service name (Impacket clone, not real PsExec)
+#
+# INVESTIGATION ARTIFACTS:
+#   Source machine:
+#     • Sysmon Event ID 1: PsExec.exe process creation + command line args
+#     • Sysmon Event ID 3: Network connection to target:445
+#     • Prefetch: C:\Windows\Prefetch\PSEXEC.EXE-*.pf
+#     • Shimcache / Amcache entries
+#
+#   Target machine:
+#     • System Event ID 7045: Service installation (timestamp = attack time)
+#     • System Event ID 7036: Service state changes (start/stop)
+#     • Security Event ID 4624/4648: Logon events
+#     • Sysmon Event ID 1: PSEXESVC.exe + child processes
+#
+# CONTAINMENT:
+#   • Isolate both source and target hosts immediately
+#   • Block SMB (port 445) at NGFW between workstation subnets
+#   • Disable compromised accounts
+#   • Pull memory from target to recover injected payloads
+#   • Check all hosts the compromised account has logged into (Event 4624)
+#
+# SCOPE THE BREACH:
+#   • Query SIEM: all 4624 logon type 3 events for compromised account
+#   • Query SIEM: all 7045 service installs in the past 24–48h
+#   • Identify attacker's "crown jewel" target — what were they after?
+#   • Check for data staging/exfiltration (large SMB writes, DNS beaconing)
+#
+# MITRE ATT&CK MAPPING:
+#   T1021.002  — Remote Services: SMB/Windows Admin Shares
+#   T1543.003  — Create or Modify System Process: Windows Service
+#   T1569.002  — System Services: Service Execution
+#   T1570      — Lateral Tool Transfer
+#   T1078      — Valid Accounts (stolen credentials used for auth)
+#   T1550.002  — Pass the Hash (common PsExec variant with NTLM hash)
+# ============================================================
+
+# ============================================================
+# SIEM Backend Conversion Examples
+# ============================================================
+# Splunk SPL (Sysmon + Windows Security):
+#   (index=windows source="WinEventLog:System" EventCode=7045
+#    ServiceName="PSEXESVC")
+#   OR
+#   (index=windows source="WinEventLog:Microsoft-Windows-Sysmon/Operational"
+#    EventCode=1 Image="*\\PsExec.exe")
+#   OR
+#   (index=windows source="WinEventLog:Microsoft-Windows-Sysmon/Operational"
+#    EventCode=1 ParentImage="*\\PSEXESVC.exe")
+#
+# Elastic (EQL):
+#   sequence by host.id
+#   [network where destination.port == 445 and
+#    process.name like~ "PsExec*"]
+#   [process where process.name == "PSEXESVC.exe"]
+#
+# Wazuh native rules: local_rules.xml rule IDs 100201–100205
+# (Linux equivalents for SSH-based lateral movement)
+# ============================================================

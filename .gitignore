@@ -1,0 +1,10 @@
+# Never commit credentials or certificates
+.env
+config/wazuh/certs/
+
+# Docker artifacts
+*.log
+
+# OS
+.DS_Store
+Thumbs.db

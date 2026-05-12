@@ -1,0 +1,108 @@
+title: SSH Brute Force Attack
+id: 5f7b3c2a-1d4e-4a8f-9c6b-2e1f3d5a7b9c
+status: stable
+description: |
+  Detects brute force attacks against SSH services by identifying multiple
+  consecutive authentication failures from a single source IP within a short
+  time window. Attackers use brute force to guess weak passwords on exposed
+  SSH services, which is one of the most common initial access vectors.
+
+  In a real SOC environment, this rule should fire within seconds of an attack
+  starting, triggering a Tier-1 analyst review. If a successful login follows
+  failed attempts, escalate immediately to Tier-2 (account compromise).
+
+author: SOC Home Lab
+date: 2026-05-11
+modified: 2026-05-11
+references:
+  - https://attack.mitre.org/techniques/T1110/001/
+  - https://www.ssh.com/academy/ssh/brute-force
+
+tags:
+  - attack.credential_access
+  - attack.t1110              # Brute Force
+  - attack.t1110.001          # Password Guessing
+  - attack.initial_access
+  - attack.t1078              # Valid Accounts (post-success)
+
+logsource:
+  product: linux
+  service: auth
+  # Matches /var/log/auth.log on Debian/Ubuntu systems
+  # Wazuh decoder: sshd — rule group: authentication_failures
+
+detection:
+  # Step 1: Define what a single failure event looks like
+  selection_failed_login:
+    # syslog keywords from sshd authentication failures
+    CommandLine|contains:
+      - 'Failed password for'
+      - 'Failed publickey for'
+      - 'Invalid user'
+      - 'authentication failure'
+    # Optionally match specific sshd process
+    process.name: 'sshd'
+
+  # Step 2: Aggregate — 8+ failures from same source IP within 2 minutes
+  # Note: Sigma itself doesn't express stateful aggregation natively.
+  # The condition below is the single-event form; see the 'aggregation'
+  # section for the threshold-based expression used by SIEM backends.
+  condition: selection_failed_login
+
+  # Threshold-based aggregation (interpreted by sigmac/pySigma backends)
+  # Equivalent to: COUNT(selection_failed_login) BY src_ip > 8 WITHIN 2m
+aggregation:
+  type: count
+  field: src_ip
+  condition: "count() > 8"
+  timeframe: 2m
+
+falsepositives:
+  - Legitimate users repeatedly mistyping passwords
+  - Automated configuration management tools (Ansible, Chef) with wrong keys
+  - Load balancers performing health checks (rare)
+  - Internal vulnerability scanners (should be whitelisted by source IP)
+
+level: high
+
+# ============================================================
+# SOC Analyst Playbook
+# ============================================================
+# TRIAGE STEPS:
+#   1. Identify source IP from alert — is it internal or external?
+#   2. Check if source IP is in known-good allowlist (scanners, jump hosts)
+#   3. Search for the targeted username — does the account exist? Is it privileged?
+#   4. Check if any attempt SUCCEEDED (rule 100003 / Wazuh alert level 14)
+#
+# IF SUCCESSFUL LOGIN DETECTED:
+#   • Escalate to P1 — potential account compromise
+#   • Disable the account immediately pending investigation
+#   • Collect SSH session logs, bash history, /var/log/auth.log
+#   • Check for new files, processes, cron jobs created post-login
+#   • Determine lateral movement (did attacker SSH to other hosts?)
+#
+# CONTAINMENT OPTIONS:
+#   • Wazuh active-response: auto-block IP via iptables (firewall-drop)
+#   • Manual: iptables -I INPUT -s <ATTACKER_IP> -j DROP
+#   • Consider rate-limiting at network perimeter (iptables recent module)
+#
+# MITRE ATT&CK MAPPING:
+#   T1110.001  — Brute Force: Password Guessing
+#   T1078      — Valid Accounts (if successful)
+#   T1021.004  — Remote Services: SSH (lateral movement if pivoting)
+# ============================================================
+
+# ============================================================
+# SIEM Backend Conversion Examples
+# ============================================================
+# Elastic SIEM (EQL):
+#   sequence by source.ip with maxspan=2m
+#   [authentication where event.action == "ssh_login_failed"] with runs=8
+#
+# Splunk SPL:
+#   index=linux sourcetype=syslog "Failed password"
+#   | stats count by src_ip, _time span=2m
+#   | where count > 8
+#
+# Wazuh native rule: local_rules.xml rule IDs 100001–100003
+# ============================================================

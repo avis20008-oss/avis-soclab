@@ -1,0 +1,233 @@
+# ============================================================
+# SOC Home Lab — Wazuh SIEM + Vulnerable Ubuntu Target
+# Wazuh 4.7.x single-node deployment
+# ============================================================
+
+services:
+
+  # ----------------------------------------------------------
+  # Wazuh Indexer (OpenSearch) — stores all SIEM data
+  # ----------------------------------------------------------
+  wazuh.indexer:
+    image: wazuh/wazuh-indexer:4.7.4
+    container_name: wazuh-indexer
+    hostname: wazuh.indexer
+    restart: unless-stopped
+    ports:
+      - "9200:9200"
+    environment:
+      OPENSEARCH_JAVA_OPTS: "-Xms512m -Xmx512m"
+      bootstrap.memory_lock: "true"
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536
+        hard: 65536
+    volumes:
+      - wazuh-indexer-data:/var/lib/wazuh-indexer
+      - ./config/wazuh/certs/root-ca.pem:/usr/share/wazuh-indexer/certs/root-ca.pem:ro
+      - ./config/wazuh/certs/wazuh.indexer-key.pem:/usr/share/wazuh-indexer/certs/indexer-key.pem:ro
+      - ./config/wazuh/certs/wazuh.indexer.pem:/usr/share/wazuh-indexer/certs/indexer.pem:ro
+      - ./config/wazuh/certs/admin.pem:/usr/share/wazuh-indexer/certs/admin.pem:ro
+      - ./config/wazuh/certs/admin-key.pem:/usr/share/wazuh-indexer/certs/admin-key.pem:ro
+      - ./config/wazuh/wazuh-indexer.yml:/usr/share/wazuh-indexer/opensearch.yml:ro
+      - ./config/wazuh/internal_users.yml:/usr/share/wazuh-indexer/opensearch-security/internal_users.yml
+    networks:
+      - soc-lab
+    healthcheck:
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/9200 && echo ok"]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 60s
+
+  # ----------------------------------------------------------
+  # Wazuh Manager — SIEM engine, rule processing, agent mgmt
+  # ----------------------------------------------------------
+  wazuh.manager:
+    image: wazuh/wazuh-manager:4.7.4
+    container_name: wazuh-manager
+    hostname: wazuh.manager
+    restart: unless-stopped
+    ports:
+      - "1514:1514/udp"   # Agent communication (UDP)
+      - "1514:1514/tcp"   # Agent communication (TCP)
+      - "1515:1515"       # Agent enrollment
+      - "514:514/udp"     # Syslog ingestion
+      - "55000:55000"     # Wazuh API
+    environment:
+      INDEXER_URL: https://wazuh.indexer:9200
+      INDEXER_USERNAME: admin
+      INDEXER_PASSWORD: ${WAZUH_INDEXER_PASSWORD:-SecretPassword}
+      FILEBEAT_SSL_VERIFICATION_MODE: full
+      SSL_CERTIFICATE_AUTHORITIES: /etc/ssl/root-ca.pem
+      SSL_CERTIFICATE: /etc/ssl/filebeat.pem
+      SSL_KEY: /etc/ssl/filebeat.key
+      API_USERNAME: wazuh-wui
+      API_PASSWORD: ${WAZUH_API_PASSWORD:-MyS3cr37P450r.*-}
+    volumes:
+      - wazuh-manager-config:/var/ossec/etc
+      - wazuh-manager-logs:/var/ossec/logs
+      - wazuh-manager-queue:/var/ossec/queue
+      - wazuh-manager-var-multigroups:/var/ossec/var/multigroups
+      - wazuh-manager-integrations:/var/ossec/integrations
+      - wazuh-manager-active-response:/var/ossec/active-response/bin
+      - wazuh-manager-agentless:/var/ossec/agentless
+      - wazuh-manager-wodles:/var/ossec/wodles
+      - wazuh-filebeat-etc:/etc/filebeat
+      - wazuh-filebeat-var:/var/lib/filebeat
+      - ./config/wazuh/certs/root-ca-manager.pem:/etc/ssl/root-ca.pem:ro
+      - ./config/wazuh/certs/wazuh.manager.pem:/etc/ssl/filebeat.pem:ro
+      - ./config/wazuh/certs/wazuh.manager-key.pem:/etc/ssl/filebeat.key:ro
+      - ./config/wazuh/authd.pass:/wazuh-config-mount/etc/authd.pass:ro
+      - ./config/wazuh/local_rules.xml:/wazuh-config-mount/etc/rules/local_rules.xml:ro
+    networks:
+      - soc-lab
+    depends_on:
+      wazuh.indexer:
+        condition: service_healthy
+
+  # ----------------------------------------------------------
+  # Wazuh Dashboard — Web UI (OpenSearch Dashboards)
+  # ----------------------------------------------------------
+  wazuh.dashboard:
+    image: wazuh/wazuh-dashboard:4.7.4
+    container_name: wazuh-dashboard
+    hostname: wazuh.dashboard
+    restart: unless-stopped
+    ports:
+      - "443:5601"        # HTTPS dashboard access
+    environment:
+      INDEXER_USERNAME: admin
+      INDEXER_PASSWORD: ${WAZUH_INDEXER_PASSWORD:-SecretPassword}
+      WAZUH_API_URL: https://wazuh.manager
+      DASHBOARD_USERNAME: kibanaserver
+      DASHBOARD_PASSWORD: ${DASHBOARD_PASSWORD:-kibanaserver}
+      API_USERNAME: wazuh-wui
+      API_PASSWORD: ${WAZUH_API_PASSWORD:-MyS3cr37P450r.*-}
+    volumes:
+      - ./config/wazuh/certs/wazuh.dashboard.pem:/usr/share/wazuh-dashboard/certs/wazuh-dashboard.pem:ro
+      - ./config/wazuh/certs/wazuh.dashboard-key.pem:/usr/share/wazuh-dashboard/certs/wazuh-dashboard.key:ro
+      - ./config/wazuh/certs/root-ca.pem:/usr/share/wazuh-dashboard/certs/root-ca.pem:ro
+      - ./config/wazuh-dashboard/opensearch_dashboards.yml:/usr/share/wazuh-dashboard/config/opensearch_dashboards.yml:ro
+    networks:
+      - soc-lab
+    depends_on:
+      - wazuh.indexer
+      - wazuh.manager
+
+  # ----------------------------------------------------------
+  # Ubuntu Target — vulnerable host with Wazuh agent
+  # Simulates an endpoint being monitored by the SOC
+  # ----------------------------------------------------------
+  ubuntu-target:
+    build:
+      context: ./targets
+      dockerfile: Dockerfile
+    container_name: ubuntu-target
+    hostname: ubuntu-target
+    restart: unless-stopped
+    ports:
+      - "2222:22"         # SSH (exposed for attack simulation)
+    environment:
+      WAZUH_MANAGER: wazuh.manager
+      WAZUH_AGENT_NAME: FINANCE-WORKSTATION-01
+      WAZUH_REGISTRATION_PASSWORD: ${WAZUH_AGENT_ENROLLMENT_PASSWORD:-please123}
+    volumes:
+      - ubuntu-target-logs:/var/log
+    networks:
+      - soc-lab
+    depends_on:
+      - wazuh.manager
+    cap_add:
+      - SYS_PTRACE    # Needed for some agent features
+    security_opt:
+      - seccomp:unconfined
+
+  # ----------------------------------------------------------
+  # Simulated Windows Workstation — WIN-WORKSTATION-01
+  # Generates realistic Windows Event Log JSON (4624/4625/4688/7045)
+  # ----------------------------------------------------------
+  win-workstation-01:
+    build:
+      context: ./targets/windows-sim
+      dockerfile: Dockerfile
+    container_name: win-workstation-01
+    hostname: win-workstation-01
+    restart: unless-stopped
+    environment:
+      WAZUH_MANAGER: wazuh.manager
+      WIN_HOSTNAME: HR-LAPTOP-01
+      WAZUH_REGISTRATION_PASSWORD: ${WAZUH_AGENT_ENROLLMENT_PASSWORD:-please123}
+    networks:
+      - soc-lab
+    depends_on:
+      - wazuh.manager
+
+  # ----------------------------------------------------------
+  # Simulated Windows Workstation — WIN-WORKSTATION-02
+  # ----------------------------------------------------------
+  win-workstation-02:
+    build:
+      context: ./targets/windows-sim
+      dockerfile: Dockerfile
+    container_name: win-workstation-02
+    hostname: win-workstation-02
+    restart: unless-stopped
+    environment:
+      WAZUH_MANAGER: wazuh.manager
+      WIN_HOSTNAME: DEVOPS-WORKSTATION-01
+      WAZUH_REGISTRATION_PASSWORD: ${WAZUH_AGENT_ENROLLMENT_PASSWORD:-please123}
+    networks:
+      - soc-lab
+    depends_on:
+      - wazuh.manager
+
+  # ----------------------------------------------------------
+  # Simulated Windows Server — WIN-SERVER-01
+  # Generates higher-privilege event patterns (domain controller style)
+  # ----------------------------------------------------------
+  win-server-01:
+    build:
+      context: ./targets/windows-sim
+      dockerfile: Dockerfile
+    container_name: win-server-01
+    hostname: win-server-01
+    restart: unless-stopped
+    environment:
+      WAZUH_MANAGER: wazuh.manager
+      WIN_HOSTNAME: WEBDEV-WORKSATION-01
+      WAZUH_REGISTRATION_PASSWORD: ${WAZUH_AGENT_ENROLLMENT_PASSWORD:-please123}
+    networks:
+      - soc-lab
+    depends_on:
+      - wazuh.manager
+
+# ----------------------------------------------------------
+# Networks
+# ----------------------------------------------------------
+networks:
+  soc-lab:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/24
+
+# ----------------------------------------------------------
+# Persistent Volumes
+# ----------------------------------------------------------
+volumes:
+  wazuh-indexer-data:
+  wazuh-manager-config:
+  wazuh-manager-logs:
+  wazuh-manager-queue:
+  wazuh-manager-var-multigroups:
+  wazuh-manager-integrations:
+  wazuh-manager-active-response:
+  wazuh-manager-agentless:
+  wazuh-manager-wodles:
+  wazuh-filebeat-etc:
+  wazuh-filebeat-var:
+  ubuntu-target-logs:

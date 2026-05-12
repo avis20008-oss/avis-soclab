@@ -1,0 +1,219 @@
+title: Suspicious PowerShell Execution
+id: 8a3f1c9d-2b5e-4f7a-8c1d-3e6f2a4b8c0e
+status: stable
+description: |
+  Detects suspicious or potentially malicious PowerShell execution patterns
+  commonly used by attackers for: initial payload execution, living-off-the-land
+  attacks, in-memory execution (fileless malware), defense evasion via encoding,
+  and C2 communication.
+
+  PowerShell is a dual-use tool — it is heavily used by attackers BECAUSE it
+  is trusted by Windows, has broad system access, and can download/execute
+  payloads entirely from memory without touching disk. This makes it a top
+  detection priority in any Windows environment.
+
+  This rule covers both Windows (PowerShell.exe / pwsh.exe) and cross-platform
+  PowerShell Core on Linux targets.
+
+author: SOC Home Lab
+date: 2026-05-11
+modified: 2026-05-11
+references:
+  - https://attack.mitre.org/techniques/T1059/001/
+  - https://lolbas-project.github.io/
+  - https://github.com/danielbohannon/Invoke-Obfuscation
+
+tags:
+  - attack.execution
+  - attack.t1059.001          # Command and Scripting Interpreter: PowerShell
+  - attack.defense_evasion
+  - attack.t1027              # Obfuscated Files or Information
+  - attack.t1140              # Deobfuscate/Decode Files or Information
+  - attack.t1105              # Ingress Tool Transfer (download cradles)
+  - attack.t1086              # Legacy tag — PowerShell
+
+logsource:
+  product: windows
+  category: process_creation
+  # Primary log source: Sysmon Event ID 1 (Process Creation)
+  # Alternative:  Windows Security Event ID 4688 (with command line auditing)
+  # PowerShell ScriptBlock logging: Event ID 4104 (Microsoft-Windows-PowerShell)
+  definition: |
+    Requires one of:
+    - Sysmon installed with process creation logging (recommended)
+    - Windows Security auditing with 'Audit Process Creation' enabled
+      AND 'Include command line in process creation events' GPO set
+    - PowerShell Script Block Logging enabled via GPO
+
+detection:
+  # ── Base selection: PowerShell process ────────────────────
+  selection_process:
+    Image|endswith:
+      - '\powershell.exe'
+      - '\pwsh.exe'
+
+  # ── Encoding / Obfuscation indicators ─────────────────────
+  selection_encoded:
+    CommandLine|contains:
+      - ' -EncodedCommand '
+      - ' -enc '
+      - ' -ec '
+      - ' -e '         # short alias for -EncodedCommand
+      - 'FromBase64String'
+      - '[Convert]::FromBase64'
+      - 'ToBase64String'
+
+  # ── Download cradles (fileless payload delivery) ──────────
+  selection_download:
+    CommandLine|contains:
+      - 'DownloadString'
+      - 'DownloadFile'
+      - 'Invoke-WebRequest'
+      - 'IWR '
+      - 'Net.WebClient'
+      - 'WebClient'
+      - 'Start-BitsTransfer'
+      - 'bitsadmin'
+      - 'certutil'
+
+  # ── Execution policy bypass ───────────────────────────────
+  selection_policy_bypass:
+    CommandLine|contains:
+      - '-ExecutionPolicy Bypass'
+      - '-ep Bypass'
+      - '-ep bypass'
+      - 'Set-ExecutionPolicy Bypass'
+      - '-ExecutionPolicy Unrestricted'
+      - '-nop'         # -NoProfile
+      - '-noni'        # -NonInteractive
+
+  # ── Hidden window / process concealment ──────────────────
+  selection_hidden:
+    CommandLine|contains:
+      - '-WindowStyle Hidden'
+      - '-W Hidden'
+      - '-w hidden'
+      - 'Hidden'
+    CommandLine|contains:
+      - '-NonInteractive'
+      - '-NoLogo'
+
+  # ── Invoke-Expression / dynamic execution ─────────────────
+  selection_iex:
+    CommandLine|contains:
+      - 'Invoke-Expression'
+      - 'IEX('
+      - 'IEX ('
+      - '| IEX'
+      - '|IEX'
+      - 'Invoke-Command'
+
+  # ── Reflection / in-memory assembly loading ───────────────
+  selection_reflection:
+    CommandLine|contains:
+      - '[System.Reflection.Assembly]::Load'
+      - 'Assembly::Load'
+      - 'LoadWithPartialName'
+      - '[System.Runtime.InteropServices'
+
+  # ── Suspicious PowerShell modules (offensive tools) ───────
+  selection_tools:
+    CommandLine|contains:
+      - 'Invoke-Mimikatz'
+      - 'Invoke-BloodHound'
+      - 'Invoke-Shellcode'
+      - 'PowerSploit'
+      - 'PowerView'
+      - 'PowerUp'
+      - 'Empire'
+      - 'Cobalt'
+      - 'Get-GPPPassword'
+      - 'Invoke-DllInjection'
+      - 'Invoke-ReflectivePEInjection'
+
+  # ── AMSI bypass attempts ──────────────────────────────────
+  selection_amsi_bypass:
+    CommandLine|contains:
+      - 'AmsiUtils'
+      - 'amsiInitFailed'
+      - 'Reflection.Assembly'
+      - '[Ref].Assembly'
+      - 'System.Management.Automation.AmsiUtils'
+
+  # Final condition: any of the suspicious patterns
+  condition: >
+    selection_process and (
+      selection_encoded or
+      selection_download or
+      selection_policy_bypass or
+      selection_hidden or
+      selection_iex or
+      selection_reflection or
+      selection_tools or
+      selection_amsi_bypass
+    )
+
+falsepositives:
+  - Software deployment and patch management tools (SCCM, Intune, PDQ)
+  - Legitimate system administration scripts
+  - Developer tooling (Chocolatey, PowerShell Gallery installs)
+  - Security scanning tools (Tenable, Qualys PowerShell modules)
+  - Antivirus/EDR products that use PowerShell internally
+  # Reduce FPs by: whitelisting specific parent processes (msiexec.exe for installers),
+  # whitelisting known script hashes, tuning on CommandLine content specifics
+
+level: high
+
+# ============================================================
+# SOC Analyst Playbook
+# ============================================================
+# TRIAGE STEPS:
+#   1. Examine full CommandLine — decode Base64 if -EncodedCommand used:
+#      [System.Text.Encoding]::Unicode.GetString([Convert]::FromBase64String("..."))
+#   2. Identify parent process: was it spawned by Office app, browser, or script?
+#   3. Check network connections made by the powershell.exe process
+#   4. Look for subsequent child processes (cmd.exe, wscript.exe, rundll32.exe)
+#   5. Examine Sysmon Event ID 3 (Network Connection) from same process
+#
+# HIGH SEVERITY INDICATORS:
+#   • IEX + DownloadString combo = fileless malware delivery
+#   • EncodedCommand + -WindowStyle Hidden = likely malicious
+#   • Any Invoke-Mimikatz / known tool names
+#   • AMSI bypass attempt = active defense evasion
+#
+# INVESTIGATION ARTIFACTS:
+#   • PowerShell ScriptBlock logs: Event ID 4104
+#   • Sysmon: Event IDs 1 (process), 3 (network), 7 (image load)
+#   • Module logging: Event ID 4103
+#   • Transcript files (if logging enabled): %USERPROFILE%\Documents\PowerShell\Transcripts
+#
+# CONTAINMENT:
+#   • Isolate endpoint immediately if confirmed malicious
+#   • Pull full memory image if sophisticated threat suspected
+#   • Check for persistence: scheduled tasks, registry Run keys, services
+#
+# MITRE ATT&CK MAPPING:
+#   T1059.001  — PowerShell
+#   T1027      — Obfuscated Files or Information
+#   T1140      — Deobfuscate/Decode Files
+#   T1105      — Ingress Tool Transfer
+#   T1562.001  — Impair Defenses: Disable or Modify Tools (AMSI bypass)
+# ============================================================
+
+# ============================================================
+# SIEM Backend Conversion Examples
+# ============================================================
+# Splunk SPL (Sysmon):
+#   index=windows source="WinEventLog:Microsoft-Windows-Sysmon/Operational"
+#   EventCode=1 Image="*\\powershell.exe"
+#   (CommandLine="*-EncodedCommand*" OR CommandLine="*DownloadString*"
+#    OR CommandLine="*IEX*" OR CommandLine="*Invoke-Mimikatz*")
+#
+# Elastic (EQL):
+#   process where process.name == "powershell.exe"
+#     and (process.command_line like~ "*-EncodedCommand*"
+#          or process.command_line like~ "*DownloadString*"
+#          or process.command_line like~ "*IEX(*")
+#
+# Wazuh native rules: local_rules.xml rule IDs 100101–100104
+# ============================================================

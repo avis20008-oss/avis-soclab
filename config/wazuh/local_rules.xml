@@ -1,0 +1,199 @@
+<!--
+  SOC Home Lab — Custom Wazuh Detection Rules
+  These Wazuh rules implement the detections described in the /detections Sigma rules.
+
+  Rule ID ranges:
+    100000-100099  Brute Force / Authentication Attacks
+    100100-100199  Suspicious Execution / PowerShell
+    100200-100299  Lateral Movement
+    100300-100399  General Lab Enrichment
+-->
+
+<group name="soc-lab,">
+
+  <!-- ========================================================
+       BRUTE FORCE / AUTHENTICATION ATTACKS
+       Wazuh equivalents of detections/brute_force_ssh.yml
+       ======================================================== -->
+
+  <!-- Multiple failed SSH logins from same IP (auth.log decoder) -->
+  <rule id="100001" level="10" frequency="8" timeframe="120">
+    <if_matched_sid>5760</if_matched_sid>
+    <same_source_ip />
+    <description>SOC-LAB: SSH brute force — 8+ failures from $(srcip) in 2 minutes</description>
+    <mitre>
+      <id>T1110.001</id>   <!-- Brute Force: Password Guessing -->
+    </mitre>
+    <group>authentication_failures,brute_force,soc_lab_alert,</group>
+  </rule>
+
+  <!-- Brute force from external IP (non-RFC1918) -->
+  <rule id="100002" level="12" frequency="5" timeframe="60">
+    <if_matched_sid>5760</if_matched_sid>
+    <same_source_ip />
+    <srcip negate="yes">192.168.0.0/16</srcip>
+    <srcip negate="yes">10.0.0.0/8</srcip>
+    <srcip negate="yes">172.16.0.0/12</srcip>
+    <description>SOC-LAB: SSH brute force from external IP $(srcip)</description>
+    <mitre>
+      <id>T1110.001</id>
+    </mitre>
+    <group>authentication_failures,brute_force,external_attack,soc_lab_alert,</group>
+  </rule>
+
+  <!-- Successful login AFTER multiple failures — credential stuffing success -->
+  <rule id="100003" level="14">
+    <if_matched_sid>100001</if_matched_sid>
+    <if_sid>5715</if_sid>    <!-- SSH successful login -->
+    <same_source_ip />
+    <description>SOC-LAB: CRITICAL — Successful SSH login after brute force from $(srcip)</description>
+    <mitre>
+      <id>T1110.001</id>
+      <id>T1078</id>         <!-- Valid Accounts -->
+    </mitre>
+    <group>brute_force,authentication_success,soc_lab_alert,high_severity,</group>
+  </rule>
+
+  <!-- Root login via SSH (should never happen in prod) -->
+  <rule id="100004" level="10">
+    <if_sid>5715</if_sid>
+    <match>sshd: Accepted</match>
+    <user>root</user>
+    <description>SOC-LAB: Direct root SSH login from $(srcip) — policy violation</description>
+    <mitre>
+      <id>T1078.003</id>   <!-- Local Accounts -->
+    </mitre>
+    <group>policy_violation,soc_lab_alert,</group>
+  </rule>
+
+  <!-- ========================================================
+       SUSPICIOUS EXECUTION / POWERSHELL
+       Wazuh equivalents of detections/suspicious_powershell.yml
+       (On Linux targets, detect bash equivalents and script exec)
+       ======================================================== -->
+
+  <!-- Base64-encoded command execution (bash -c 'base64...' pattern) -->
+  <rule id="100101" level="10">
+    <if_sid>0</if_sid>
+    <program_name>bash</program_name>
+    <match>base64 -d|echo.*|bash|eval.*base64</match>
+    <description>SOC-LAB: Possible encoded/obfuscated command execution via bash</description>
+    <mitre>
+      <id>T1059.004</id>   <!-- Unix Shell -->
+      <id>T1027</id>       <!-- Obfuscated Files or Information -->
+    </mitre>
+    <group>obfuscation,suspicious_execution,soc_lab_alert,</group>
+  </rule>
+
+  <!-- Script downloaded and executed (curl | bash pattern) -->
+  <rule id="100102" level="12">
+    <if_sid>0</if_sid>
+    <program_name>bash,sh</program_name>
+    <match>curl.*\|.*bash|wget.*\|.*bash|curl.*\|.*sh|wget.*\|.*sh</match>
+    <description>SOC-LAB: Script downloaded and executed directly (curl/wget | bash)</description>
+    <mitre>
+      <id>T1059.004</id>
+      <id>T1105</id>       <!-- Ingress Tool Transfer -->
+    </mitre>
+    <group>suspicious_execution,download_exec,soc_lab_alert,</group>
+  </rule>
+
+  <!-- Auditd: execution of scripting interpreters from unusual parents -->
+  <rule id="100103" level="10">
+    <if_sid>80792</if_sid>   <!-- auditd execve -->
+    <field name="audit.exe">/usr/bin/python3|/usr/bin/perl|/usr/bin/ruby|/usr/bin/php</field>
+    <field name="audit.ppid" negate="yes">1</field>
+    <description>SOC-LAB: Scripting interpreter executed — possible code execution</description>
+    <mitre>
+      <id>T1059</id>
+    </mitre>
+    <group>suspicious_execution,soc_lab_alert,</group>
+  </rule>
+
+  <!-- Suspicious process names (common tool-drop indicators) -->
+  <rule id="100104" level="11">
+    <if_sid>80792</if_sid>
+    <field name="audit.exe">ncat|nc.openbsd|netcat|socat|msfconsole|msfvenom</field>
+    <description>SOC-LAB: Known attacker tool executed: $(audit.exe)</description>
+    <mitre>
+      <id>T1095</id>       <!-- Non-Application Layer Protocol -->
+      <id>T1571</id>       <!-- Non-Standard Port -->
+    </mitre>
+    <group>attacker_tool,suspicious_execution,soc_lab_alert,</group>
+  </rule>
+
+  <!-- ========================================================
+       LATERAL MOVEMENT — PsExec / SMB / Remote Exec
+       Wazuh equivalents of detections/lateral_movement_psexec.yml
+       (Linux equivalents: SSH pivoting, scp drops, sudo abuse)
+       ======================================================== -->
+
+  <!-- SSH port forwarding / tunneling detected -->
+  <rule id="100201" level="10">
+    <if_sid>5715</if_sid>
+    <match>subsystem sftp|port forwarding|direct-tcpip|tcpip-forward</match>
+    <description>SOC-LAB: SSH tunneling or port forwarding initiated by $(dstuser)</description>
+    <mitre>
+      <id>T1572</id>       <!-- Protocol Tunneling -->
+      <id>T1021.004</id>   <!-- SSH lateral movement -->
+    </mitre>
+    <group>lateral_movement,tunneling,soc_lab_alert,</group>
+  </rule>
+
+  <!-- New SSH key added to authorized_keys (persistence + lateral movement) -->
+  <rule id="100202" level="12">
+    <if_sid>550</if_sid>   <!-- FIM integrity change -->
+    <match>authorized_keys</match>
+    <description>SOC-LAB: SSH authorized_keys modified — possible persistence or lateral access</description>
+    <mitre>
+      <id>T1098.004</id>   <!-- Account Manipulation: SSH Authorized Keys -->
+      <id>T1021.004</id>
+    </mitre>
+    <group>lateral_movement,persistence,fim,soc_lab_alert,high_severity,</group>
+  </rule>
+
+  <!-- SCP/SFTP file transfer (data movement between hosts) -->
+  <rule id="100203" level="8">
+    <if_sid>5715</if_sid>
+    <match>subsystem sftp</match>
+    <description>SOC-LAB: SFTP session started by $(dstuser) from $(srcip)</description>
+    <mitre>
+      <id>T1021.004</id>
+      <id>T1105</id>
+    </mitre>
+    <group>lateral_movement,file_transfer,soc_lab_alert,</group>
+  </rule>
+
+  <!-- Sudo privilege escalation to root -->
+  <rule id="100204" level="9">
+    <if_sid>5402</if_sid>   <!-- Successful sudo -->
+    <match>sudo:.*COMMAND=</match>
+    <description>SOC-LAB: Sudo privilege escalation by $(dstuser)</description>
+    <mitre>
+      <id>T1548.003</id>   <!-- Sudo and Sudo Caching -->
+    </mitre>
+    <group>privilege_escalation,lateral_movement,soc_lab_alert,</group>
+  </rule>
+
+  <!-- New user account created (attacker establishing persistence) -->
+  <rule id="100205" level="10">
+    <if_sid>5901</if_sid>   <!-- useradd -->
+    <description>SOC-LAB: New user account created: $(dstuser) — verify if authorized</description>
+    <mitre>
+      <id>T1136.001</id>   <!-- Create Account: Local Account -->
+    </mitre>
+    <group>persistence,lateral_movement,soc_lab_alert,</group>
+  </rule>
+
+  <!-- ========================================================
+       GENERAL ENRICHMENT / HOUSEKEEPING
+       ======================================================== -->
+
+  <!-- Aggregate alert for SOC dashboard — any soc_lab_alert rule -->
+  <rule id="100300" level="3">
+    <if_sid>100001,100002,100003,100004,100101,100102,100103,100104,100201,100202,100203,100204,100205</if_sid>
+    <description>SOC-LAB Alert aggregator — see child rule for details</description>
+    <group>soc_lab_summary,</group>
+  </rule>
+
+</group>

@@ -1,0 +1,34 @@
+# ============================================================
+# Intentionally weak SSH configuration for SOC lab
+# WARNING: Do NOT use these settings in production!
+# ============================================================
+Port 22
+ListenAddress 0.0.0.0
+
+# Authentication — intentionally permissive for attack simulation
+PermitRootLogin yes              # BAD: allows root login
+PasswordAuthentication yes       # Enables brute force attacks
+PermitEmptyPasswords no
+MaxAuthTries 6                   # Low limit — triggers Wazuh brute force rule
+PubkeyAuthentication yes
+
+# Logging — verbose so Wazuh captures all events
+LogLevel VERBOSE
+SyslogFacility AUTH
+
+# Session settings
+LoginGraceTime 30
+ClientAliveInterval 120
+ClientAliveCountMax 3
+MaxSessions 10
+MaxStartups 10:30:100
+
+# SFTP subsystem (for lateral movement simulation)
+Subsystem sftp /usr/lib/openssh/sftp-server
+
+# X11 — disabled to reduce attack surface slightly
+X11Forwarding no
+
+# Allow TCP forwarding (for tunneling simulation)
+AllowTcpForwarding yes
+GatewayPorts no

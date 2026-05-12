@@ -1,0 +1,50 @@
+# Internal users for Wazuh Indexer (OpenSearch Security)
+# Passwords are hashed with bcrypt. Change these for production!
+# Generate new hash: docker run --rm wazuh/wazuh-indexer:4.7.4 bash -c "echo 'YOURPASSWORD' | /usr/share/wazuh-indexer/plugins/opensearch-security/tools/hash.sh"
+---
+_meta:
+  type: "internalusers"
+  config_version: 2
+
+admin:
+  hash: "$2y$12$T8jp1bCmqOnt4uIfvvMNlObSuMwgW/.GQZiiyyw07sOjWtu9qAfR6"  # SecretPassword1!
+  reserved: true
+  backend_roles:
+    - "admin"
+  description: "Admin user"
+
+kibanaserver:
+  hash: "$2a$12$4AcgAt3xwOWadA5s5blL6ev39OXDNhmOesEoo33eZtrq2N0YrU3H."  # kibanaserver
+  reserved: true
+  description: "OpenSearch Dashboards service account"
+
+kibanaro:
+  hash: "$2a$12$JJSXNfTowz7Uu5ttXfeYpeYE0arACvcwleFALK6RF3zldCoHszh0i"  # kibanaro
+  reserved: false
+  backend_roles:
+    - "kibanauser"
+    - "readall"
+  attributes:
+    attribute1: "value1"
+  description: "Read-only Kibana user"
+
+logstash:
+  hash: "$2a$12$u1ShR4l4uBS3Uv59Pa2y5.1uQuZBrZtmwfqKdnkOf/Tm3llbd5NiG"  # logstash
+  reserved: false
+  backend_roles:
+    - "logstash"
+  description: "Logstash service account"
+
+readall:
+  hash: "$2a$12$ae4ycwzwvLtZxwZ82RmiEunBbIPjth2gnNaLNpgAeCyoWXBSwuAT6"  # readall
+  reserved: false
+  backend_roles:
+    - "readall"
+  description: "Read-only user"
+
+snapshotrestore:
+  hash: "$2y$12$DpwmetHKwgYnorbgdvORCenv4NAK8cPUg8AI6pxLCuWf/ALc0.v7W"  # snapshotrestore
+  reserved: false
+  backend_roles:
+    - "snapshotrestore"
+  description: "Snapshot and restore user"

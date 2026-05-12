@@ -1,0 +1,87 @@
+## SOC Lab Auditd Rules — captures events forwarded to Wazuh
+
+# Delete all existing rules
+-D
+
+# Set buffer size for high-load environments
+-b 8192
+
+# Failure mode: 1=print failure, 2=panic on failure
+-f 1
+
+# ============================================================
+# Identity changes
+# ============================================================
+-w /etc/passwd -p wa -k identity
+-w /etc/group -p wa -k identity
+-w /etc/shadow -p wa -k identity
+-w /etc/gshadow -p wa -k identity
+-w /etc/sudoers -p wa -k privilege_escalation
+-w /etc/sudoers.d/ -p wa -k privilege_escalation
+
+# ============================================================
+# SSH key files (lateral movement indicator)
+# ============================================================
+-w /root/.ssh -p wa -k ssh_keys
+-w /home -p wa -k ssh_keys
+
+# ============================================================
+# Privileged command execution
+# ============================================================
+-a always,exit -F arch=b64 -S execve -F euid=0 -k privileged
+-a always,exit -F arch=b32 -S execve -F euid=0 -k privileged
+
+# Specific privileged binaries
+-w /usr/bin/sudo -p x -k sudo_usage
+-w /usr/bin/su -p x -k su_usage
+-w /usr/sbin/useradd -p x -k user_management
+-w /usr/sbin/userdel -p x -k user_management
+-w /usr/sbin/usermod -p x -k user_management
+-w /usr/sbin/groupadd -p x -k group_management
+-w /usr/sbin/groupdel -p x -k group_management
+
+# ============================================================
+# Suspicious executables (attack tool monitoring)
+# ============================================================
+-w /usr/bin/nmap -p x -k recon_tool
+-w /usr/bin/nc -p x -k netcat
+-w /usr/bin/netcat -p x -k netcat
+-w /usr/bin/ncat -p x -k netcat
+-w /usr/bin/wget -p x -k download_tool
+-w /usr/bin/curl -p x -k download_tool
+-w /usr/bin/python3 -p x -k scripting
+-w /usr/bin/python -p x -k scripting
+-w /usr/bin/perl -p x -k scripting
+
+# ============================================================
+# Network configuration changes
+# ============================================================
+-a always,exit -F arch=b64 -S sethostname -S setdomainname -k network_modification
+-w /etc/hosts -p wa -k network_modification
+-w /etc/hostname -p wa -k network_modification
+-w /etc/network/ -p wa -k network_modification
+-w /etc/resolv.conf -p wa -k network_modification
+
+# ============================================================
+# Cron jobs (persistence mechanism)
+# ============================================================
+-w /etc/cron.allow -p wa -k cron
+-w /etc/cron.deny -p wa -k cron
+-w /etc/cron.d/ -p wa -k cron
+-w /etc/cron.daily/ -p wa -k cron
+-w /etc/cron.hourly/ -p wa -k cron
+-w /etc/cron.monthly/ -p wa -k cron
+-w /etc/cron.weekly/ -p wa -k cron
+-w /etc/crontab -p wa -k cron
+-w /var/spool/cron/ -p wa -k cron
+
+# ============================================================
+# Kernel module loading (rootkit indicator)
+# ============================================================
+-w /sbin/insmod -p x -k kernel_module
+-w /sbin/rmmod -p x -k kernel_module
+-w /sbin/modprobe -p x -k kernel_module
+-a always,exit -F arch=b64 -S init_module -S delete_module -k kernel_module
+
+# Make rules immutable (comment out for easier lab reloads)
+# -e 2
